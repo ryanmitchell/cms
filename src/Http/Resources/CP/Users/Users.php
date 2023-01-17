@@ -22,6 +22,10 @@ class Users extends ResourceCollection
     {
         $this->blueprint = $blueprint;
 
+        // ensure groups and roles are in the user blueprint
+        $this->blueprint->ensureField('roles', ['type' => 'user_roles', 'visibility' => 'read_only']);
+        $this->blueprint->ensureField('groups', ['type' => 'user_groups', 'visibility' => 'read_only']);
+
         return $this;
     }
 
