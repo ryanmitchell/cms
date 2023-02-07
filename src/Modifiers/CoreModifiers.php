@@ -1043,6 +1043,32 @@ class CoreModifiers extends Modifier
     }
 
     /**
+     * Check if an array intersects another array
+     *
+     * @param $value
+     * @param $params
+     * @return bool
+     */
+    public function intersects($haystack, $params, $context)
+    {
+        if (! is_array($haystack)) {
+            return false;
+        }
+
+        $needle = Arr::get($params, 0);
+
+        if (is_string($needle)) {
+            $needle = Arr::get($context, $needle, false);
+        }
+
+        if (! is_array($needle)) {
+            return false;
+        }
+
+        return ! empty(array_intersect($haystack, $needle));
+    }
+
+    /**
      * Inserts $substring into the string at the $position provided.
      *
      * @param $value
