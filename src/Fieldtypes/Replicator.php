@@ -9,6 +9,7 @@ use Statamic\Fields\Fieldtype;
 use Statamic\Fields\Values;
 use Statamic\GraphQL\Types\ReplicatorSetsType;
 use Statamic\GraphQL\Types\ReplicatorSetType;
+use Statamic\Query\ItemQueryBuilder;
 use Statamic\Query\Scopes\Filters\Fields\Replicator as ReplicatorFilter;
 use Statamic\Support\Arr;
 use Statamic\Support\Str;
@@ -308,5 +309,10 @@ class Replicator extends Fieldtype
     public function toQueryableValue($value)
     {
         return empty($value) ? null : $value;
+    }
+
+    public function relationshipQueryBuilder()
+    {
+        return new ItemQueryBuilder();
     }
 }

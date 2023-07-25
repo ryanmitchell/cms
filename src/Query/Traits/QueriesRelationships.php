@@ -4,6 +4,8 @@ namespace Statamic\Query\Traits;
 
 use Closure;
 use InvalidArgumentException;
+use Statamic\Query\ItemQueryBuilder;
+use Statamic\Support\Str;
 
 trait QueriesRelationships
 {
@@ -40,6 +42,35 @@ trait QueriesRelationships
 
         if ($count != 1) {
             throw new InvalidArgumentException('Counting with subqueries in has clauses is not supported');
+        }
+
+        // if we are querying inside a structure then get the query to this point
+        // then query inside the structure for matches to the callback
+        if ($relationQueryBuilder instanceof ItemQueryBuilder) {
+            $clone = clone $this;
+
+            $items = $clone->get()->flatMap(function ($item) use ($relation) {
+                $value = $item->get($relation);
+
+                if (! $value) {
+                    return;
+                }
+
+                $id = $item->id();
+
+                return collect($value)->map(function ($part, $index) use ($id) {
+                    return array_merge($part, ['__iteration_id' => $id.'::'.$index]);
+                });
+            })
+                ->filter();
+
+            $ids = $relationQueryBuilder->withItems($items)
+                ->where($callback)
+                ->get()
+                ->map(fn ($item) => Str::before($item['__iteration_id'], '::'))
+                ->all();
+
+            return $this->whereIn('id', $ids);
         }
 
         $ids = $relationQueryBuilder
@@ -218,7 +249,7 @@ trait QueriesRelationships
         $relationField = $this->getBlueprintsForRelations()
             ->flatMap(function ($blueprint) use ($relation) {
                 return $blueprint->fields()->all()->map(function ($field) use ($relation) {
-                    if ($field->handle() == $relation && $field->fieldtype()->isRelationship()) {
+                    if ($field->handle() == $relation && $field->fieldtype()->relationshipQueryBuilder() !== false) {
                         return $field;
                     }
                 })
