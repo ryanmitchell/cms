@@ -289,7 +289,7 @@ class Entries extends Relationship
 
             throw_if(! $collection, new CollectionNotFoundException($collectionHandle));
 
-            if (! $user->can('create', [EntryContract::class, $collection])) {
+            if (! $user || ! $user->can('create', [EntryContract::class, $collection])) {
                 return null;
             }
 
