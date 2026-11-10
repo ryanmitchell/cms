@@ -81,6 +81,23 @@ class FastParserTest extends TestCase
 
             'deep nesting' => self::nested(70),
             'nesting beyond symfony\'s limit' => self::nested(130),
+            'deep nesting, a mapping and a sequence per space of indentation' => self::nestedSequences(40),
+            'nesting beyond symfony\'s limit, a mapping and a sequence per space of indentation' => self::nestedSequences(70),
+
+            'literal block, with tabs' => "a: |\n  one\n  \ttabbed\nb: 1\n",
+            'literal block, empty' => "a: |\nb: 1\n",
+            'literal block, before the last line of front matter' => "---\na:\n  b: |\n    one\n    two\nc: 1",
+            'literal block, strip, before the last line of front matter' => "---\na:\n  b: |-\n    one\n    two\nc: 1",
+            'unindented sequence after a blank line' => "a:\n\n- one\nb: 1\n",
+            'unindented sequence after a whitespace-only line' => "a:\n  \n- one\nb: 1\n",
+            'empty sequence item before a blank line' => "-\n\n- one\n",
+            'keys starting with a digit' => "1_simple_content: one\n2nd: two\n",
+            'dashed and quoted keys' => "brand-reverse: one\n'New Zealand': two\n",
+            'double quoted with escapes' => "a: \"one\\ntwo \\\"quoted\\\"\"\nb: 1\n",
+            'document end marker after a value' => 'a: 1...',
+            'nested sequence on one line' => "a:\n  - - one\n  - two\n",
+            'tab after a key' => "a:\tone\n",
+
             'top level sequence' => "- a\n- b\n",
             'top level scalar' => 'just a string',
             'invalid: tab indentation' => "a:\n\tb: 1\n",
@@ -91,6 +108,9 @@ class FastParserTest extends TestCase
             'invalid: unexpected indentation' => "a: 1\n  b: 2\n",
             'invalid: mapping in sequence' => "a:\n  - x\n  b: 1\n",
             'invalid: utf-8' => "a: \xff\n",
+            'invalid: reserved word as a key' => "null:\n",
+            'invalid: malformed flow sequence' => "a: [1{2]\n",
+            'invalid: characters after a quoted value' => "a: 'one'two\n",
         ])->mapWithKeys(fn ($yaml, $name) => [$name => [$yaml]])->all();
     }
 
@@ -103,6 +123,21 @@ class FastParserTest extends TestCase
         }
 
         return $yaml;
+    }
+
+    /**
+     * Each level is a mapping holding a sequence at the key's own indentation, so every
+     * space of indentation adds two levels of nesting.
+     */
+    private static function nestedSequences(int $depth): string
+    {
+        $yaml = '';
+
+        for ($i = 0; $i < $depth; $i++) {
+            $yaml .= str_repeat(' ', $i)."level$i:\n".str_repeat(' ', $i)."-\n";
+        }
+
+        return $yaml.str_repeat(' ', $depth)."last: 1\n";
     }
 
     #[Test]
@@ -127,6 +162,37 @@ class FastParserTest extends TestCase
 
         $this->assertSame($data, $this->parseWithoutFallingBack($yaml));
         $this->assertSame($data, $this->parseWithoutFallingBack("---\n".$yaml));
+    }
+
+    #[Test]
+    public function it_uses_the_fast_path_for_values_only_symfony_can_read()
+    {
+        $yaml = <<<'YAML'
+title: "Line one\nLine \"two\""
+1_simple_content: 2024-01-01
+'New Zealand': 1.5
+brand-reverse: { }
+script: |-
+  <script>
+  	tabbed();
+  </script>
+last: true
+YAML;
+
+        $this->assertSame((new Parser)->parse($yaml), $this->parseWithoutFallingBack($yaml));
+    }
+
+    #[Test]
+    public function it_remembers_a_limited_number_of_keys()
+    {
+        $yaml = implode("\n", array_map(fn ($i) => "key_$i: $i", range(1, 5000)));
+
+        $this->assertParsesTheSameAsSymfony($yaml);
+        $this->assertParsesTheSameAsSymfony($yaml);
+
+        $remembered = (new \ReflectionProperty(FastParser::class, 'keys'))->getValue();
+
+        $this->assertLessThanOrEqual(2048, count($remembered));
     }
 
     #[Test]
