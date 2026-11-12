@@ -87,8 +87,14 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         }
 
         foreach ($collections as $collection) {
+            $store = $this->entriesStore($collection);
+
+            // Pick up files changed since the last request, as the Stache does when an
+            // index is used, before the rows are queried.
+            $store->handleFileChanges();
+
             // Indexing a field makes sure every entry in the collection has a row.
-            $this->entriesStore($collection)->ensureField('id');
+            $store->ensureField('id');
         }
 
         $whereBindings = [];
@@ -388,8 +394,8 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         }
 
         if ($excluded) {
-            // The Stache excludes the entries that are in *every* NotIn clause's terms.
-            $sql[] = 'NOT ('.implode(' AND ', array_column($excluded, 0)).')';
+            // An entry in any NotIn clause's terms is excluded.
+            $sql[] = 'NOT ('.implode(' OR ', array_column($excluded, 0)).')';
 
             foreach ($excluded as [, $subqueryBindings]) {
                 array_push($bindings, ...$subqueryBindings);

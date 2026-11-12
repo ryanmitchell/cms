@@ -168,10 +168,71 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
         $this->setPath($key, $item->path());
 
-        // Only the Stache indexes something has built need keeping up to date.
-        $this->resolveIndexes()->filter->isCached()->each->updateItem($item);
+        $this->forgetStacheIndexes();
 
         $this->cacheItem($item);
+    }
+
+    public function delete($item)
+    {
+        $this->deleteItemFromDisk($item);
+
+        $key = $this->getItemKey($item);
+
+        $this->forgetItem($key);
+        $this->forgetPath($key);
+        $this->forgetStacheIndexes();
+    }
+
+    /**
+     * Queries are answered from the database, so the Stache's own indexes for these
+     * entries are only built when a query has to fall back to the Stache. Keeping
+     * them up to date meant loading and saving every one of them on every save, so
+     * they're forgotten instead, and built again if a query needs one. (The "path"
+     * index holds the store's paths, which are kept up to date themselves.)
+     */
+    private function forgetStacheIndexes(): void
+    {
+        $this->resolveIndexes()->except('path')->each(function ($index) {
+            $index->clear();
+        });
+    }
+
+    /**
+     * A tree or route change can change entries' uris, orders and parents. Caching
+     * the entries again works out every indexed value for them afresh.
+     */
+    public function updateUris($ids = null)
+    {
+        $this->updateEntries($ids);
+    }
+
+    public function updateOrders($ids = null)
+    {
+        $this->updateEntries($ids);
+    }
+
+    public function updateParents($ids = null)
+    {
+        $this->updateEntries($ids);
+    }
+
+    private function updateEntries($ids): void
+    {
+        $ids = collect($ids)->isEmpty() ? $this->paths()->keys() : collect($ids);
+
+        $this->db()->transaction(function () use ($ids) {
+            $entries = $this->withoutBlinkingEntryUris(fn () => $ids->map(fn ($id) => $this->getItem($id))->filter());
+
+            $entries->each(fn ($entry) => $this->cacheItem($entry));
+        });
+
+        // Stache indexes that something has built (the collections store uses "order") stay up to date.
+        foreach (['uri', 'order', 'parent'] as $name) {
+            if (($index = $this->resolveIndex($name))->isCached()) {
+                $index->update();
+            }
+        }
     }
 
     protected function readCachedItem($key)
