@@ -24,6 +24,17 @@ class TaxonomyTermsStore extends ChildStore
         'site',
     ];
 
+    protected function storeIndexes()
+    {
+        $indexes = $this->storeIndexes;
+
+        if (config('statamic.stache.sqlite.enabled')) {
+            $indexes['associations'] = \Statamic\Stache\Sqlite\TermAssociations::class;
+        }
+
+        return $indexes;
+    }
+
     public function indexes($withUsages = true)
     {
         $indexes = parent::indexes($withUsages);

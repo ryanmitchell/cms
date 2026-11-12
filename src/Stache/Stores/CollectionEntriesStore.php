@@ -283,20 +283,40 @@ class CollectionEntriesStore extends ChildStore
 
     protected function getCachedItem($key)
     {
-        if (! $entry = $this->getSnapshotCopy($key) ?? Stache::cacheStore()->get($this->getItemCacheKey($key))) {
+        if (! $entry = $this->getSnapshotCopy($key) ?? $this->readCachedItem($key)) {
             return null;
         }
 
-        if (! Index::isLoading() && $this->shouldBlinkEntryUris && ($uri = $this->resolveIndex('uri')->load()->get($entry->id()))) {
+        if (! Index::isLoading() && $this->shouldBlinkEntryUris && ($uri = $this->cachedUri($entry->id()))) {
             Blink::store('entry-uris')->put($entry->id(), $uri);
         }
 
         return $entry;
     }
 
-    protected function cacheItem($item)
+    protected function readCachedItem($key)
+    {
+        return Stache::cacheStore()->get($this->getItemCacheKey($key));
+    }
+
+    protected function cachedUri($id)
+    {
+        return $this->resolveIndex('uri')->load()->get($id);
+    }
+
+    protected function writeCachedItem($item)
     {
         parent::cacheItem($item);
+    }
+
+    protected function forgetCachedItem($key)
+    {
+        parent::forgetItem($key);
+    }
+
+    protected function cacheItem($item)
+    {
+        $this->writeCachedItem($item);
 
         $key = $this->getItemKey($item);
         $snapshot = $this->snapshots()->get($key);
@@ -315,7 +335,7 @@ class CollectionEntriesStore extends ChildStore
     {
         $this->snapshots()->forget($key);
 
-        parent::forgetItem($key);
+        $this->forgetCachedItem($key);
     }
 
     private function takeSnapshot(EntryInstance $entry): void

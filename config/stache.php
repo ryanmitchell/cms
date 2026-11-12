@@ -142,6 +142,22 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | SQLite (experimental)
+    |--------------------------------------------------------------------------
+    |
+    | Cache entries, and the values they're queried by, in a SQLite database
+    | instead of the cache store. Your content files are still the source of
+    | truth, and the database is rebuilt whenever the Stache is warmed.
+    |
+    */
+
+    'sqlite' => [
+        'enabled' => env('STATAMIC_STACHE_SQLITE', false),
+        'path' => env('STATAMIC_STACHE_SQLITE_PATH', storage_path('statamic/stache.sqlite')),
+    ],
+
     'lock' => [
         'enabled' => true,
         'timeout' => 30,

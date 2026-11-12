@@ -29,8 +29,21 @@ class ServiceProvider extends LaravelServiceProvider
         });
 
         $this->app->bind(EntryQueryBuilder::class, function () {
-            return new EntryQueryBuilder($this->app->make(Stache::class)->store('entries'));
+            $builder = config('statamic.stache.sqlite.enabled') ? Sqlite\EntryQueryBuilder::class : EntryQueryBuilder::class;
+
+            return new $builder($this->app->make(Stache::class)->store('entries'));
         });
+
+        if (config('statamic.stache.sqlite.enabled')) {
+            $this->app->singleton(Sqlite\Database::class, function () {
+                return new Sqlite\Database(config('statamic.stache.sqlite.path') ?? storage_path('statamic/stache.sqlite'));
+            });
+
+            $this->app->singleton(Sqlite\ValueEncoder::class);
+
+            $this->app->bind(Stores\CollectionEntriesStore::class, Sqlite\CollectionEntriesStore::class);
+            $this->app->bind(Stores\EntriesStore::class, Sqlite\EntriesStore::class);
+        }
 
         $this->app->bind(AssetQueryBuilder::class, function () {
             return new AssetQueryBuilder($this->app->make(Stache::class)->store('assets'));
