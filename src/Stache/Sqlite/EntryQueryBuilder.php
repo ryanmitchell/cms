@@ -28,6 +28,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
     public function get($columns = ['*'])
     {
         if (! $compiled = $this->compile('e.key', order: true, limit: true)) {
+
             return parent::get($columns);
         }
 
@@ -68,13 +69,15 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
      */
     private function compile(string $select, bool $order, bool $limit): ?array
     {
+
         if ($this->randomize) {
             return null;
         }
 
-        // Without an order, the Stache returns an "or" clause's extra matches after the
-        // ones before it, rather than in file order. Leave those queries to the Stache.
-        if ($order && empty($this->orderBys) && $this->hasOrWhere($this->wheres)) {
+        // Without an order, the Stache returns entries in the order the first clause finds
+        // them, and an "or" clause adds its matches after those rather than in file order.
+        // Leave the queries where that happens to the Stache.
+        if ($order && empty($this->orderBys) && ! $this->keepsFileOrder($this->wheres)) {
             return null;
         }
 
@@ -159,15 +162,22 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         return count($bindings) > self::MAX_BINDINGS ? null : [$sql, $bindings];
     }
 
-    private function hasOrWhere(array $wheres): bool
+    /**
+     * Whether the Stache would return these clauses' matches in file order. Each "and"
+     * keeps the order of the clauses before it, so only an "or" changes it, and only
+     * in the chain of first clauses that the order comes from.
+     */
+    private function keepsFileOrder(array $wheres): bool
     {
-        foreach ($wheres as $where) {
-            if ($where['boolean'] === 'or' || ($where['type'] === 'Nested' && $this->hasOrWhere($where['query']->wheres))) {
-                return true;
+        foreach (array_values($wheres) as $i => $where) {
+            if ($i > 0 && $where['boolean'] === 'or' && $where['type'] !== 'NotIn') {
+                return false;
             }
         }
 
-        return false;
+        $first = $wheres[array_key_first($wheres) ?? 0] ?? null;
+
+        return ! $first || $first['type'] !== 'Nested' || $this->keepsFileOrder($first['query']->wheres);
     }
 
     private function entriesStore(string $collection): CollectionEntriesStore
@@ -244,6 +254,15 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         $encoder = app(ValueEncoder::class);
 
         if ($operator === '=') {
+            if ($value instanceof DateTimeInterface) {
+                // Two dates are equal when they're the same moment, however they're displayed.
+                // Anything else is compared as a string, as the Stache does.
+                $bindings[] = (float) $value->format('U.u');
+                $bindings[] = $encoder->eq($value);
+
+                return "((type = 'date' AND ABS(num - ?) < 0.0000005) OR (type <> 'date' AND eq = ?))";
+            }
+
             $bindings[] = $encoder->eq($value);
 
             return 'eq = ?';
