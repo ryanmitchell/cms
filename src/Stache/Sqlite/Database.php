@@ -12,7 +12,7 @@ use PDOStatement;
  */
 class Database
 {
-    const SCHEMA_VERSION = 5;
+    const SCHEMA_VERSION = 6;
 
     private ?PDO $pdo = null;
 
@@ -127,7 +127,7 @@ class Database
             return;
         }
 
-        $pdo->exec('DROP TABLE IF EXISTS entries; DROP TABLE IF EXISTS entry_values; DROP TABLE IF EXISTS entry_fields; DROP TABLE IF EXISTS entry_terms;');
+        $pdo->exec('DROP TABLE IF EXISTS entries; DROP TABLE IF EXISTS entry_values; DROP TABLE IF EXISTS entry_fields; DROP TABLE IF EXISTS entry_terms; DROP TABLE IF EXISTS entry_collections; DROP TABLE IF EXISTS entry_files;');
 
         $pdo->exec(<<<'SQL'
             CREATE TABLE entries (
@@ -135,8 +135,22 @@ class Database
                 collection TEXT NOT NULL,
                 id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
+                path TEXT NOT NULL,
                 data BLOB NOT NULL
             );
+
+            -- The collections whose files have been read, so an empty one isn't read again.
+            CREATE TABLE entry_collections (
+                collection TEXT PRIMARY KEY
+            ) WITHOUT ROWID;
+
+            -- Each file and its modified time, as the watcher last saw them.
+            CREATE TABLE entry_files (
+                collection TEXT NOT NULL,
+                path TEXT NOT NULL,
+                mtime INTEGER NOT NULL,
+                PRIMARY KEY (collection, path)
+            ) WITHOUT ROWID;
 
             -- One row per entry per indexed field. The columns hold the value in the
             -- forms the Stache's PHP comparisons need, so SQL can give the same answers.

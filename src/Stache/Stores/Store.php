@@ -190,15 +190,14 @@ abstract class Store
         }
 
         // Get the existing files and timestamps from the cache.
-        $cacheKey = "stache::timestamps::{$this->key()}";
-        $existing = collect(Stache::cacheStore()->get($cacheKey, []));
+        $existing = collect($this->getCachedTimestamps());
 
         // Get the files and timestamps from the filesystem right now.
         $files = Traverser::filter([$this, 'getItemFilter'])->traverse($this);
 
         // Cache the files and timestamps, ready for comparisons on the next request.
         // We'll do it now since there are multiple early returns coming up.
-        Stache::cacheStore()->forever($cacheKey, $files->all());
+        $this->cacheTimestamps($files->all());
 
         // If there are no existing file timestamps in the cache, there's nothing to update.
         if ($existing->isEmpty()) {
@@ -306,7 +305,7 @@ abstract class Store
             return $this->paths;
         }
 
-        if ($paths = Stache::cacheStore()->get($this->pathsCacheKey())) {
+        if ($paths = $this->getCachedPaths()) {
             return $this->paths = collect($paths);
         }
 
@@ -337,7 +336,7 @@ abstract class Store
 
         $this->cachePaths($paths);
 
-        Stache::cacheStore()->forever("stache::timestamps::{$this->key()}", $files->all());
+        $this->cacheTimestamps($files->all());
 
         $this->keys()->cache();
 
@@ -366,6 +365,24 @@ abstract class Store
         $this->cachePaths($paths);
 
         $this->keys()->set($key, $path)->cache();
+    }
+
+    protected function getCachedPaths()
+    {
+        return Stache::cacheStore()->get($this->pathsCacheKey());
+    }
+
+    /**
+     * The files the store was made from, and their modified times, as the watcher last saw them.
+     */
+    protected function getCachedTimestamps(): array
+    {
+        return Stache::cacheStore()->get("stache::timestamps::{$this->key()}", []);
+    }
+
+    protected function cacheTimestamps(array $files): void
+    {
+        Stache::cacheStore()->forever("stache::timestamps::{$this->key()}", $files);
     }
 
     protected function cachePaths($paths)

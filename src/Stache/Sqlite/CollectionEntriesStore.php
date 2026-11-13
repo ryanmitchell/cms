@@ -42,6 +42,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
     private ?array $fields = null;
     private ?int $seq = null;
     private ?array $taxonomies = null;
+    private ?array $timestamps = null;
 
     private function db(): Database
     {
@@ -118,13 +119,15 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         $this->items = null;
         $this->fields = null;
         $this->seq = null;
+        $this->timestamps = null;
+        $this->keys = null;
     }
 
     public function clear()
     {
         if (! static::$tablesCleared) {
             $this->db()->transaction(function () {
-                foreach (['entries', 'entry_values', 'entry_fields', 'entry_terms'] as $table) {
+                foreach (['entries', 'entry_values', 'entry_fields', 'entry_terms', 'entry_collections', 'entry_files'] as $table) {
                     $this->db()->run("DELETE FROM {$table} WHERE collection = ?", [$this->childKey()]);
                 }
             });
@@ -135,17 +138,15 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         $this->made = [];
         $this->items = null;
 
-        // What Store::clear() does, without forgetting each entry one at a time.
+        // What Store::clear() resets, which is all in the tables now.
         $this->resolveIndexes()->each(function ($index) {
-            $index->clear();
             app('stache.indexes')->forget("{$this->key()}.{$index->name()}");
         });
 
-        $this->usedIndexes = collect();
-        Stache::cacheStore()->forget($this->indexUsageCacheKey());
-        $this->clearCachedPaths();
-        $this->keys()->clear();
-        Stache::cacheStore()->forget("stache::timestamps::{$this->key()}");
+        $this->usedIndexes = null;
+        $this->paths = null;
+        $this->keys = null;
+        $this->timestamps = null;
     }
 
     public function getItem($key)
@@ -187,17 +188,130 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
     }
 
     /**
-     * Queries are answered from the database, so the Stache's own indexes for these
-     * entries are only built when a query has to fall back to the Stache. Keeping
-     * them up to date meant loading and saving every one of them on every save, so
-     * they're forgotten instead, and built again if a query needs one. (The "path"
-     * index holds the store's paths, which are kept up to date themselves.)
+     * Indexes asked for directly are made from the tables when they're needed (see
+     * index()), and only kept in memory, so after a change they're just let go of.
      */
     private function forgetStacheIndexes(): void
     {
-        $this->resolveIndexes()->except('path')->each(function ($index) {
-            $index->clear();
+        $this->resolveIndexes()->each->resetMemoizedState();
+    }
+
+    /**
+     * An index, made from the indexed values rather than the Stache's cache, for
+     * anything that asks the store for one directly.
+     */
+    public function index($name)
+    {
+        $this->handleFileChanges();
+
+        $index = $this->resolveIndex($name);
+
+        if (! (fn () => $this->loaded)->call($index)) {
+            $this->ensureField($name);
+
+            $prefix = strlen($this->childKey()) + 2;
+            $items = [];
+
+            foreach ($this->db()->run('SELECT v.key, v.type, v.raw, v.num, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.collection = ? ORDER BY e.seq', [$name, $this->childKey()]) as $row) {
+                $items[substr($row['key'], $prefix)] = PhpFilter::value($row['type'], $row['raw'], $row['num'], $row['php']);
+            }
+
+            (function () use ($items) {
+                $this->items = $items;
+                $this->loaded = true;
+            })->call($index);
+        }
+
+        return $index;
+    }
+
+    /**
+     * The fields that have been indexed are the ones that have been used.
+     */
+    public function indexUsage()
+    {
+        return $this->usedIndexes = collect(array_keys($this->populatedFields()));
+    }
+
+    public function cacheIndexUsage($index)
+    {
+        // Indexing a field records it.
+    }
+
+    public function keys()
+    {
+        return $this->keys ??= new Keys($this);
+    }
+
+    protected function getCachedPaths()
+    {
+        if (! $this->db()->run('SELECT 1 FROM entry_collections WHERE collection = ?', [$this->childKey()])->fetchColumn()) {
+            return null;
+        }
+
+        $prefix = strlen($this->childKey()) + 2;
+        $paths = [];
+
+        foreach ($this->db()->run('SELECT key, path FROM entries WHERE collection = ? ORDER BY seq', [$this->childKey()]) as $row) {
+            $paths[substr($row['key'], $prefix)] = $row['path'];
+        }
+
+        return $paths;
+    }
+
+    protected function cachePaths($paths)
+    {
+        // Each entry's path is kept on its row, so there's only the list to remember,
+        // and that the collection's files have been read.
+        $this->paths = $paths;
+
+        $this->db()->run('INSERT OR IGNORE INTO entry_collections (collection) VALUES (?)', [$this->childKey()]);
+    }
+
+    public function clearCachedPaths()
+    {
+        $this->paths = null;
+
+        $this->db()->run('DELETE FROM entry_collections WHERE collection = ?', [$this->childKey()]);
+    }
+
+    protected function getCachedTimestamps(): array
+    {
+        $timestamps = [];
+
+        foreach ($this->db()->run('SELECT path, mtime FROM entry_files WHERE collection = ?', [$this->childKey()]) as $row) {
+            $timestamps[$row['path']] = (int) $row['mtime'];
+        }
+
+        return $this->timestamps = $timestamps;
+    }
+
+    /**
+     * Only the files that changed are written, rather than every file on every request.
+     */
+    protected function cacheTimestamps(array $files): void
+    {
+        $known = $this->timestamps ?? $this->getCachedTimestamps();
+
+        $this->db()->transaction(function () use ($known, $files) {
+            $delete = $this->db()->statement('DELETE FROM entry_files WHERE collection = ? AND path = ?');
+
+            foreach (array_diff_key($known, $files) as $path => $mtime) {
+                $delete->execute([$this->childKey(), $path]);
+            }
+
+            $changed = [];
+
+            foreach ($files as $path => $mtime) {
+                if (($known[$path] ?? null) !== (int) $mtime) {
+                    $changed[] = [$this->childKey(), $path, (int) $mtime];
+                }
+            }
+
+            $this->db()->insertMany('entry_files', ['collection', 'path', 'mtime'], $changed, [], 'INSERT OR REPLACE');
         });
+
+        $this->timestamps = array_map('intval', $files);
     }
 
     /**
@@ -233,12 +347,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
             $entries->each(fn ($entry) => $this->cacheItem($entry));
         });
 
-        // Stache indexes that something has built (the collections store uses "order") stay up to date.
-        foreach (['uri', 'order', 'parent'] as $name) {
-            if (($index = $this->resolveIndex($name))->isCached()) {
-                $index->update();
-            }
-        }
+        $this->forgetStacheIndexes();
     }
 
     protected function readCachedItem($key)
@@ -268,12 +377,13 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         // Files being made into entries in bulk are new rows, in file order.
         $seq = $this->bulk ? false : $this->db()->run('SELECT seq FROM entries WHERE key = ?', [$row])->fetchColumn();
 
-        $statement = $this->db()->statement('INSERT OR REPLACE INTO entries (key, collection, id, seq, data) VALUES (?, ?, ?, ?, ?)');
+        $statement = $this->db()->statement('INSERT OR REPLACE INTO entries (key, collection, id, seq, path, data) VALUES (?, ?, ?, ?, ?, ?)');
         $statement->bindValue(1, $row);
         $statement->bindValue(2, $this->childKey());
         $statement->bindValue(3, (string) $item->id());
         $statement->bindValue(4, $seq === false ? $this->nextSeq() : (int) $seq, PDO::PARAM_INT);
-        $statement->bindValue(5, serialize($item), PDO::PARAM_LOB);
+        $statement->bindValue(5, (string) $item->path());
+        $statement->bindValue(6, serialize($item), PDO::PARAM_LOB);
         $statement->execute();
 
         if ($this->bulk) {
@@ -346,11 +456,6 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
                 $this->fields[$field] = $numeric;
             }
         });
-
-        // So the next warm indexes them straight away, as the Stache does with indexes it has used.
-        foreach ($missing as $field) {
-            $this->cacheIndexUsage($field);
-        }
 
         if (! $this->warming && ! $this->db()->bulkLoading) {
             $this->db()->analyze();
