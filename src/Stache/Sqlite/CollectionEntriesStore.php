@@ -243,9 +243,14 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         return $this->keys ??= new Keys($this);
     }
 
+    private function filesRead(): bool
+    {
+        return (bool) $this->db()->run('SELECT 1 FROM entry_collections WHERE collection = ?', [$this->childKey()])->fetchColumn();
+    }
+
     protected function getCachedPaths()
     {
-        if (! $this->db()->run('SELECT 1 FROM entry_collections WHERE collection = ?', [$this->childKey()])->fetchColumn()) {
+        if (! $this->filesRead()) {
             return null;
         }
 
@@ -274,6 +279,12 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
      */
     protected function setPath($key, $path)
     {
+        // A collection whose files haven't been read yet is read now, as the Stache
+        // does, so the entry being saved is part of it from here on.
+        if (! $this->paths && ! $this->filesRead()) {
+            $this->paths();
+        }
+
         $this->paths?->put($key, $path);
         $this->keys?->set($key, $path);
     }
