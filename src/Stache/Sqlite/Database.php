@@ -12,7 +12,7 @@ use PDOStatement;
  */
 class Database
 {
-    const SCHEMA_VERSION = 6;
+    const SCHEMA_VERSION = 7;
 
     private ?PDO $pdo = null;
 
@@ -81,6 +81,7 @@ class Database
         'CREATE INDEX entry_values_key ON entry_values (key)',
         'CREATE INDEX entry_terms_slug ON entry_terms (taxonomy, slug)',
         'CREATE INDEX entry_terms_key ON entry_terms (key)',
+        'CREATE INDEX entry_terms_value ON entry_terms (taxonomy, value_key)',
     ];
 
     private function createIndexes(PDO $pdo): void
@@ -184,6 +185,7 @@ class Database
                 taxonomy TEXT NOT NULL,
                 slug TEXT NOT NULL,
                 value TEXT NOT NULL,
+                value_key TEXT,
                 id TEXT NOT NULL,
                 key TEXT NOT NULL,
                 collection TEXT NOT NULL,

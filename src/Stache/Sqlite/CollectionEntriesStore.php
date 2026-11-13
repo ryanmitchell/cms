@@ -5,6 +5,7 @@ namespace Statamic\Stache\Sqlite;
 use PDO;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Stache;
+use Statamic\Stache\Sqlite\Concerns\IndexesValues;
 use Statamic\Stache\Stores\CollectionEntriesStore as StacheCollectionEntriesStore;
 use Statamic\Support\Str;
 
@@ -23,6 +24,8 @@ use Statamic\Support\Str;
  */
 class CollectionEntriesStore extends StacheCollectionEntriesStore
 {
+    use IndexesValues;
+
     /**
      * Set while the whole entries store is being cleared, when the tables have
      * already been emptied in one go.
@@ -30,7 +33,6 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
     public static bool $tablesCleared = false;
 
     private bool $bulk = false;
-    private bool $warming = false;
     private array $made = [];
 
     /**
@@ -39,24 +41,28 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
      * each taxonomy's associations) was most of the cost of warming.
      */
     private ?array $items = null;
-    private ?array $fields = null;
     private ?int $seq = null;
     private ?array $taxonomies = null;
     private ?array $timestamps = null;
 
-    private function db(): Database
+    protected function valuesTable(): string
     {
-        return app(Database::class);
+        return 'entry_values';
     }
 
-    private function encoder(): ValueEncoder
+    protected function fieldsTable(): string
     {
-        return app(ValueEncoder::class);
+        return 'entry_fields';
     }
 
-    private function rowKey($key): string
+    protected function itemsTable(): string
     {
-        return $this->childKey().'::'.$key;
+        return 'entries';
+    }
+
+    protected function scopeColumn(): string
+    {
+        return 'collection';
     }
 
     public function paths()
@@ -117,7 +123,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         parent::resetMemoizedState();
 
         $this->items = null;
-        $this->fields = null;
+        $this->forgetPopulatedFields();
         $this->seq = null;
         $this->timestamps = null;
         $this->keys = null;
@@ -133,7 +139,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
             });
         }
 
-        $this->fields = null;
+        $this->forgetPopulatedFields();
         $this->seq = null;
         $this->made = [];
         $this->items = null;
@@ -187,60 +193,24 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         $this->forgetStacheIndexes();
     }
 
-    /**
-     * Indexes asked for directly are made from the tables when they're needed (see
-     * index()), and only kept in memory, so after a change they're just let go of.
-     */
-    private function forgetStacheIndexes(): void
-    {
-        $this->resolveIndexes()->each->resetMemoizedState();
-    }
-
-    /**
-     * An index, made from the indexed values rather than the Stache's cache, for
-     * anything that asks the store for one directly.
-     */
-    public function index($name)
-    {
-        $this->handleFileChanges();
-
-        $index = $this->resolveIndex($name);
-
-        if (! (fn () => $this->loaded)->call($index)) {
-            $this->ensureField($name);
-
-            $prefix = strlen($this->childKey()) + 2;
-            $items = [];
-
-            foreach ($this->db()->run('SELECT v.key, v.type, v.raw, v.num, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.collection = ? ORDER BY e.seq', [$name, $this->childKey()]) as $row) {
-                $items[substr($row['key'], $prefix)] = PhpFilter::value($row['type'], $row['raw'], $row['num'], $row['php']);
-            }
-
-            (function () use ($items) {
-                $this->items = $items;
-                $this->loaded = true;
-            })->call($index);
-        }
-
-        return $index;
-    }
-
-    /**
-     * The fields that have been indexed are the ones that have been used.
-     */
-    public function indexUsage()
-    {
-        return $this->usedIndexes = collect(array_keys($this->populatedFields()));
-    }
-
-    public function cacheIndexUsage($index)
-    {
-        // Indexing a field records it.
-    }
-
     public function keys()
     {
         return $this->keys ??= new Keys($this);
+    }
+
+    /**
+     * Each entry's key and the file it came from.
+     */
+    public function keysWithPaths(): array
+    {
+        $prefix = strlen($this->childKey()) + 2;
+        $keys = [];
+
+        foreach ($this->db()->run('SELECT key, path FROM entries WHERE collection = ?', [$this->childKey()]) as $row) {
+            $keys[substr($row['key'], $prefix)] = $row['path'];
+        }
+
+        return $keys;
     }
 
     private function filesRead(): bool
@@ -445,51 +415,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         return ++$this->seq;
     }
 
-    /**
-     * @return array<string, bool> The indexed fields, and whether they sort as numbers.
-     */
-    public function populatedFields(): array
-    {
-        return $this->fields ??= collect($this->db()->select('SELECT field, numeric_sort FROM entry_fields WHERE collection = ?', [$this->childKey()]))
-            ->mapWithKeys(fn ($row) => [$row['field'] => (bool) $row['numeric_sort']])
-            ->all();
-    }
-
-    /**
-     * Index a field for every entry, unless it already is.
-     */
-    public function ensureField(string $field): void
-    {
-        $this->ensureFields([$field]);
-    }
-
-    /**
-     * Index fields for every entry, in one pass over the entries.
-     */
-    public function ensureFields(array $fields): void
-    {
-        $missing = array_values(array_diff($fields, array_keys($this->populatedFields())));
-
-        if (! $missing) {
-            return;
-        }
-
-        $this->db()->transaction(function () use ($missing) {
-            $placeholders = implode(', ', array_fill(0, count($missing), '?'));
-            $this->db()->run("DELETE FROM entry_values WHERE collection = ? AND field IN ({$placeholders})", [$this->childKey(), ...$missing]);
-
-            foreach ($this->writeValues($this->allItems(), $missing, true) as $field => $numeric) {
-                $this->db()->run('INSERT OR REPLACE INTO entry_fields (collection, field, numeric_sort) VALUES (?, ?, ?)', [$this->childKey(), $field, (int) $numeric]);
-                $this->fields[$field] = $numeric;
-            }
-        });
-
-        if (! $this->warming && ! $this->db()->bulkLoading) {
-            $this->db()->analyze();
-        }
-    }
-
-    private function allItems(): array
+    protected function allItems(): array
     {
         $paths = $this->paths();
 
@@ -512,44 +438,6 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         }
 
         return $this->items = $items;
-    }
-
-    /**
-     * @return array<string, bool> Whether each field still sorts as numbers.
-     */
-    private function writeValues(array $items, array $fields, bool $fresh = false): array
-    {
-        $encoder = $this->encoder();
-        $numeric = [];
-        $rows = [];
-
-        foreach ($fields as $field) {
-            $index = $this->resolveIndex($field);
-            $numeric[$field] = $fresh ? true : ($this->populatedFields()[$field] ?? true);
-
-            foreach ($items as $key => $item) {
-                $value = $index->getItemValue($item);
-                $encoded = $encoder->encode($value);
-                $numeric[$field] = $numeric[$field] && $encoder->isNumericSortable($value);
-
-                $rows[] = [
-                    $field, $this->rowKey($key), $this->childKey(), $encoded['type'], $encoded['eq'], $encoded['inkey'],
-                    $encoded['raw'], $encoded['num'], $encoded['snull'], $encoded['snum'], $encoded['skey'],
-                    // Scalars can be rebuilt from their type, raw and num; anything else is kept whole.
-                    in_array($encoded['type'], ['date', 'array', 'object']) ? serialize($value) : null,
-                ];
-            }
-
-            $this->db()->insertMany('entry_values', ['field', 'key', 'collection', 'type', 'eq', 'inkey', 'raw', 'num', 'snull', 'snum', 'skey', 'php'], $rows, [10, 11], 'INSERT OR REPLACE');
-            $rows = [];
-
-            if (! $fresh && $numeric[$field] !== ($this->populatedFields()[$field] ?? true)) {
-                $this->db()->run('UPDATE entry_fields SET numeric_sort = 0 WHERE collection = ? AND field = ?', [$this->childKey(), $field]);
-                $this->fields[$field] = false;
-            }
-        }
-
-        return $numeric;
     }
 
     /**
@@ -582,11 +470,12 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
                 foreach (collect($item->value($taxonomy))->values() as $pos => $value) {
                     $slug = is_string($value) ? ($slugs[$value] ??= Str::slug($value)) : Str::slug($value);
-                    $rows[] = [$taxonomy, $slug, json_encode($value), (string) $item->id(), $row, $this->childKey(), $item->locale(), $pos];
+                    // value_key is what the associations index groups values by.
+                    $rows[] = [$taxonomy, $slug, json_encode($value), is_array($value) ? null : (string) $value, (string) $item->id(), $row, $this->childKey(), $item->locale(), $pos];
                 }
             }
         }
 
-        $this->db()->insertMany('entry_terms', ['taxonomy', 'slug', 'value', 'id', 'key', 'collection', 'site', 'pos'], $rows);
+        $this->db()->insertMany('entry_terms', ['taxonomy', 'slug', 'value', 'value_key', 'id', 'key', 'collection', 'site', 'pos'], $rows);
     }
 }
