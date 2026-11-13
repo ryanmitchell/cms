@@ -102,7 +102,9 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
                 $this->ensureFields($this->indexes()->keys()->all());
             });
 
-            $this->db()->analyze();
+            if (! $this->db()->bulkLoading) {
+                $this->db()->analyze();
+            }
         } finally {
             $this->warming = false;
             $this->items = null;
@@ -350,7 +352,7 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
             $this->cacheIndexUsage($field);
         }
 
-        if (! $this->warming) {
+        if (! $this->warming && ! $this->db()->bulkLoading) {
             $this->db()->analyze();
         }
     }
@@ -436,7 +438,10 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         foreach ($items as $key => $item) {
             $row = $this->rowKey($key);
 
-            $delete->execute([$row]);
+            // Filling empty tables, there's nothing to replace (and no index to find it by).
+            if (! $this->db()->bulkLoading) {
+                $delete->execute([$row]);
+            }
 
             foreach ($this->taxonomies as $taxonomy) {
                 if ($item->getQueryableValue($taxonomy) === null) {

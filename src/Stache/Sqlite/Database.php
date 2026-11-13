@@ -12,9 +12,14 @@ use PDOStatement;
  */
 class Database
 {
-    const SCHEMA_VERSION = 4;
+    const SCHEMA_VERSION = 5;
 
     private ?PDO $pdo = null;
+
+    /**
+     * Whether empty tables are being filled, without their indexes.
+     */
+    public bool $bulkLoading = false;
     private array $statements = [];
     private int $transactionDepth = 0;
 
@@ -42,6 +47,7 @@ class Database
         $pdo->exec('PRAGMA synchronous = NORMAL');
         $pdo->exec('PRAGMA temp_store = MEMORY');
         $pdo->exec('PRAGMA busy_timeout = 5000');
+        $pdo->exec('PRAGMA cache_size = -65536');
 
         $this->migrate($pdo);
         $this->registerFunctions($pdo);
@@ -64,6 +70,57 @@ class Database
         $register('stache_compare', fn ($at, $ar, $an, $ap, $bt, $br, $bn, $bp, $operator) => (int) $filter->compare([$at, $ar, $an, $ap], [$bt, $br, $bn, $bp], $operator), 9);
     }
 
+    private const INDEXES = [
+        'CREATE INDEX entries_collection ON entries (collection, seq)',
+        'CREATE INDEX entries_id ON entries (id)',
+        'CREATE INDEX entry_values_eq ON entry_values (field, eq)',
+        'CREATE INDEX entry_values_inkey ON entry_values (field, inkey)',
+        'CREATE INDEX entry_values_num ON entry_values (field, num)',
+        'CREATE INDEX entry_values_snum ON entry_values (field, snull, snum)',
+        'CREATE INDEX entry_values_skey ON entry_values (field, snull, skey)',
+        'CREATE INDEX entry_values_key ON entry_values (key)',
+        'CREATE INDEX entry_terms_slug ON entry_terms (taxonomy, slug)',
+        'CREATE INDEX entry_terms_key ON entry_terms (key)',
+    ];
+
+    private function createIndexes(PDO $pdo): void
+    {
+        foreach (self::INDEXES as $index) {
+            $pdo->exec(str_replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS', $index));
+        }
+    }
+
+    /**
+     * Loads rows into empty tables without their indexes, then makes the indexes once.
+     * Keeping six indexes up to date row by row is most of the cost of filling the
+     * tables for a large site.
+     */
+    public function bulkLoad(callable $callback)
+    {
+        $pdo = $this->pdo();
+
+        if ((int) $pdo->query('SELECT COUNT(*) FROM entries')->fetchColumn() > 0) {
+            return $callback();
+        }
+
+        foreach (self::INDEXES as $index) {
+            preg_match('/CREATE INDEX (\w+)/', $index, $match);
+            $pdo->exec("DROP INDEX IF EXISTS {$match[1]}");
+        }
+
+        $this->statements = [];
+        $this->bulkLoading = true;
+
+        try {
+            return $callback();
+        } finally {
+            $this->bulkLoading = false;
+            $this->createIndexes($pdo);
+            $this->statements = [];
+            $this->analyze();
+        }
+    }
+
     private function migrate(PDO $pdo): void
     {
         if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() === self::SCHEMA_VERSION) {
@@ -80,8 +137,6 @@ class Database
                 seq INTEGER NOT NULL,
                 data BLOB NOT NULL
             );
-            CREATE INDEX entries_collection ON entries (collection, seq);
-            CREATE INDEX entries_id ON entries (id);
 
             -- One row per entry per indexed field. The columns hold the value in the
             -- forms the Stache's PHP comparisons need, so SQL can give the same answers.
@@ -100,12 +155,6 @@ class Database
                 php BLOB,
                 PRIMARY KEY (field, key)
             ) WITHOUT ROWID;
-            CREATE INDEX entry_values_eq ON entry_values (field, eq);
-            CREATE INDEX entry_values_inkey ON entry_values (field, inkey);
-            CREATE INDEX entry_values_num ON entry_values (field, num);
-            CREATE INDEX entry_values_snum ON entry_values (field, snull, snum);
-            CREATE INDEX entry_values_skey ON entry_values (field, snull, skey);
-            CREATE INDEX entry_values_key ON entry_values (key);
 
             -- Which fields have been indexed for which collections, and whether every
             -- value in them sorts as a number.
@@ -127,9 +176,10 @@ class Database
                 site TEXT NOT NULL,
                 pos INTEGER NOT NULL
             );
-            CREATE INDEX entry_terms_slug ON entry_terms (taxonomy, slug);
-            CREATE INDEX entry_terms_key ON entry_terms (key);
+
             SQL);
+
+        $this->createIndexes($pdo);
 
         $pdo->exec('PRAGMA user_version = '.self::SCHEMA_VERSION);
     }
