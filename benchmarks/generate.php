@@ -166,6 +166,7 @@ $endDate = strtotime('2026-01-01');
 
 $articleIds = [];
 $articleUris = [];
+$publishedArticleUris = [];
 $tagUsage = array_fill(1, $tagCount, 0);
 
 for ($i = 1; $i <= $count; $i++) {
@@ -201,6 +202,10 @@ for ($i = 1; $i <= $count; $i++) {
 
     $articleIds[] = $id;
     $articleUris[] = "/articles/{$slug}";
+
+    if ($data['published']) {
+        $publishedArticleUris[] = "/articles/{$slug}";
+    }
 }
 
 // Pages ----------------------------------------------------------------------
@@ -390,6 +395,8 @@ $meta = [
     'samples' => [
         'article_ids' => $pick($articleIds, 100),
         'article_uris' => $pick($articleUris, 25),
+        // Renders need one that's published, or they're (correctly) a 404.
+        'published_article_uri' => $pick($publishedArticleUris, 1)[0],
         'page_uris' => $pick($pageUris, 25),
         'deep_page_uri' => array_reduce($pageUris, fn ($deepest, $uri) => substr_count($uri, '/') > substr_count((string) $deepest, '/') ? $uri : $deepest),
         'popular_tag' => 'tag-'.$byUsage[0],

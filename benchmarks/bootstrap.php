@@ -42,6 +42,12 @@ final class BenchApplication extends Testbench
             'path' => $app->storagePath('framework/cache/data'),
             'lock_path' => $app->storagePath('framework/cache/locks'),
         ]);
+        // A second store, so a backend being compared can keep its Stache cache apart.
+        $config->set('cache.stores.file-alt', [
+            'driver' => 'file',
+            'path' => $app->storagePath('framework/cache/data-alt'),
+            'lock_path' => $app->storagePath('framework/cache/locks-alt'),
+        ]);
         $config->set('statamic.stache.watcher', false);
         $config->set('auth.providers.users.driver', 'statamic');
         $config->set('statamic.users.repository', 'file');

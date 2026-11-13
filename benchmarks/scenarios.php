@@ -94,7 +94,7 @@ return [
     'render-article' => [
         'description' => 'Article page: terms, related articles by shared tags, nav and footer.',
         'group' => 'frontend',
-        'run' => fn ($ctx) => $ctx['get']($ctx['samples']['article_uris'][0]),
+        'run' => fn ($ctx) => $ctx['get']($ctx['samples']['published_article_uri']),
     ],
 
     'render-tag' => [
