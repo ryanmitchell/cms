@@ -19,7 +19,9 @@ class ServiceProvider extends LaravelServiceProvider
     public function register()
     {
         $this->app->singleton(Stache::class, function () {
-            return (new Stache)->setLockFactory($this->locks());
+            $stache = config('statamic.stache.sqlite.enabled') ? new Sqlite\Stache : new Stache;
+
+            return $stache->setLockFactory($this->locks());
         });
 
         $this->app->alias(Stache::class, 'stache');
@@ -43,6 +45,9 @@ class ServiceProvider extends LaravelServiceProvider
 
             $this->app->bind(Stores\CollectionEntriesStore::class, Sqlite\CollectionEntriesStore::class);
             $this->app->bind(Stores\EntriesStore::class, Sqlite\EntriesStore::class);
+            $this->app->bind(Stores\TaxonomyTermsStore::class, Sqlite\TaxonomyTermsStore::class);
+
+            Statamic::repository(\Statamic\Contracts\Taxonomies\TermRepository::class, Sqlite\TermRepository::class);
         }
 
         $this->app->bind(AssetQueryBuilder::class, function () {

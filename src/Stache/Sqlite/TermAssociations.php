@@ -13,6 +13,42 @@ use Statamic\Stache\Indexes\Terms\Associations;
  */
 class TermAssociations extends Associations
 {
+    /**
+     * Read from the database when first needed, and kept in memory only.
+     */
+    public function load()
+    {
+        if (! $this->loaded) {
+            $this->loaded = true;
+            $this->items = $this->getItems();
+        }
+
+        return $this;
+    }
+
+    public function update()
+    {
+        $this->items = $this->getItems();
+        $this->loaded = true;
+
+        return $this;
+    }
+
+    public function cache()
+    {
+        //
+    }
+
+    public function isCached()
+    {
+        return false;
+    }
+
+    public function clear()
+    {
+        $this->resetMemoizedState();
+    }
+
     public function getItems()
     {
         $taxonomy = Taxonomy::findByHandle($handle = $this->store->childKey());

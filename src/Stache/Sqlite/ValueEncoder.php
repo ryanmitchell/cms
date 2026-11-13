@@ -140,7 +140,11 @@ class ValueEncoder
 
             return (fn () => $this->locale)->call($comparator);
         } catch (\Throwable) {
-            return Site::default()->locale();
+            try {
+                return Site::default()->locale();
+            } catch (\Throwable) {
+                return config('app.locale', 'en');
+            }
         }
     }
 
