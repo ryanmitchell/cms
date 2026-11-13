@@ -33,7 +33,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
     public function get($columns = ['*'])
     {
         return $this->onceWithColumns(Arr::wrap($columns), fn () => $this->withFakeQueryLogging(function () {
-            $keys = collect($this->fetch($this->compile('e.key', order: true, limit: true)));
+            $keys = collect($this->findById() ?? $this->fetch($this->compile('e.key', order: true, limit: true)));
 
             $items = $this->getItems($keys);
 
@@ -101,9 +101,9 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         $this->entriesStore($store)->ensureField($where['column']);
 
         return collect($this->db()->select(
-            'SELECT v.key, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.collection = ? ORDER BY e.seq',
+            'SELECT v.key, v.type, v.raw, v.num, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.collection = ? ORDER BY e.seq',
             [$where['column'], $store]
-        ))->mapWithKeys(fn ($row) => [$row['key'] => unserialize($row['php'])]);
+        ))->mapWithKeys(fn ($row) => [$row['key'] => PhpFilter::value($row['type'], $row['raw'], $row['num'], $row['php'])]);
     }
 
     /**
@@ -113,20 +113,58 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
     {
         $this->entriesStore($collection)->ensureField($field);
 
+        $bindings = [$field];
+        $list = $this->inList(collect($ids)->map(fn ($id) => "{$collection}::{$id}")->values()->all(), $bindings);
+
         $rows = $this->db()->select(
-            'SELECT v.key, v.php FROM entry_values v JOIN entries e ON e.key = v.key
-            WHERE v.field = ? AND v.key IN (SELECT value FROM json_each(?)) ORDER BY e.seq',
-            [$field, json_encode(collect($ids)->map(fn ($id) => "{$collection}::{$id}")->values()->all())]
+            "SELECT v.key, v.type, v.raw, v.num, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.key IN {$list} ORDER BY e.seq",
+            $bindings
         );
 
         $prefix = strlen($collection) + 2;
         $values = [];
 
         foreach ($rows as $row) {
-            $values[substr($row['key'], $prefix)] = unserialize($row['php']);
+            $values[substr($row['key'], $prefix)] = PhpFilter::value($row['type'], $row['raw'], $row['num'], $row['php']);
         }
 
         return $values;
+    }
+
+    /**
+     * Entry::find() is the most common query by far (a nav finds every page's entry
+     * this way), so a query for one id and nothing else skips building the SQL. Ids
+     * are matched case-insensitively, so one that isn't found exactly goes the long way.
+     */
+    private function findById(): ?array
+    {
+        if (count($this->wheres) !== 1 || $this->taxonomyWheres || $this->orderBys || $this->randomize || $this->limit !== null || $this->offset) {
+            return null;
+        }
+
+        $where = reset($this->wheres);
+
+        if ($where['type'] !== 'Basic' || $where['column'] !== 'id' || $where['operator'] !== '=' || ! is_string($where['value'])) {
+            return null;
+        }
+
+        $collections = empty($this->collections) ? Facades\Collection::handles()->all() : array_values(array_unique($this->collections));
+
+        foreach ($collections as $collection) {
+            $this->entriesStore($collection)->handleFileChanges();
+        }
+
+        $keys = [];
+
+        foreach ($this->db()->select('SELECT key, collection FROM entries WHERE id = ?', [$where['value']]) as $row) {
+            if (($position = array_search($row['collection'], $collections, true)) !== false) {
+                $keys[$position] = $row['key'];
+            }
+        }
+
+        ksort($keys);
+
+        return $keys ? array_values($keys) : null;
     }
 
     /**
@@ -354,7 +392,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             }
 
             return [
-                'e.key IN (SELECT a.key FROM entry_values a JOIN entry_values b ON b.key = a.key AND b.field = ? WHERE a.field = ? AND stache_compare(a.php, b.php, ?))',
+                'e.key IN (SELECT a.key FROM entry_values a JOIN entry_values b ON b.key = a.key AND b.field = ? WHERE a.field = ? AND stache_compare(a.type, a.raw, a.num, a.php, b.type, b.raw, b.num, b.php, ?))',
                 [$where['value'], $where['column'], $where['operator']],
             ];
         }
@@ -372,7 +410,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
 
         if ($condition === false) {
             // Left to the Stache's own filter for this kind of clause.
-            $condition = 'stache_match(php, ?)';
+            $condition = 'stache_match(type, raw, num, php, ?)';
             $bindings = [$this->filterIds[] = PhpFilter::register($where)];
         }
 
@@ -484,13 +522,37 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $keys[] = $encoder->inkey($value);
         }
 
-        // One binding however many values there are.
-        $bindings[] = json_encode($keys);
+        if (! $keys) {
+            return $not ? '1' : '0';
+        }
+
+        $list = $this->inList($keys, $bindings);
 
         // Arrays (and anything else without a lookup key) are never "in".
         return $not
-            ? '(inkey IS NULL OR inkey NOT IN (SELECT value FROM json_each(?)))'
-            : 'inkey IN (SELECT value FROM json_each(?))';
+            ? "(inkey IS NULL OR inkey NOT IN {$list})"
+            : "inkey IN {$list}";
+    }
+
+    /**
+     * A list for IN. A binding per value is quickest, but SQLite allows only so many,
+     * so a longer list is passed as one JSON array instead.
+     */
+    private function inList(array $values, array &$bindings): string
+    {
+        if (count($values) > 10000) {
+            $bindings[] = json_encode(array_values($values));
+
+            return '(SELECT value FROM json_each(?))';
+        }
+
+        if (! $values) {
+            return '(NULL)';
+        }
+
+        array_push($bindings, ...array_values($values));
+
+        return '('.implode(', ', array_fill(0, count($values), '?')).')';
     }
 
     /**
@@ -517,8 +579,8 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $groupBindings = [];
 
             foreach ($byTaxonomy as $taxonomy => $slugs) {
-                $groups[] = '(taxonomy = ? AND slug IN (SELECT value FROM json_each(?)))';
-                array_push($groupBindings, $taxonomy, json_encode($slugs));
+                $groupBindings[] = $taxonomy;
+                $groups[] = '(taxonomy = ? AND slug IN '.$this->inList($slugs, $groupBindings).')';
             }
 
             $subquery = $groups

@@ -400,7 +400,9 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
                 $rows[] = [
                     $field, $this->rowKey($key), $this->childKey(), $encoded['type'], $encoded['eq'], $encoded['inkey'],
-                    $encoded['raw'], $encoded['num'], $encoded['snull'], $encoded['snum'], $encoded['skey'], serialize($value),
+                    $encoded['raw'], $encoded['num'], $encoded['snull'], $encoded['snum'], $encoded['skey'],
+                    // Scalars can be rebuilt from their type, raw and num; anything else is kept whole.
+                    in_array($encoded['type'], ['date', 'array', 'object']) ? serialize($value) : null,
                 ];
             }
 

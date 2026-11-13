@@ -12,7 +12,7 @@ use PDOStatement;
  */
 class Database
 {
-    const SCHEMA_VERSION = 3;
+    const SCHEMA_VERSION = 4;
 
     private ?PDO $pdo = null;
     private array $statements = [];
@@ -60,8 +60,8 @@ class Database
             ? fn ($name, $callback, $args) => $pdo->createFunction($name, $callback, $args)
             : fn ($name, $callback, $args) => $pdo->sqliteCreateFunction($name, $callback, $args);
 
-        $register('stache_match', fn ($value, $id) => (int) $filter->matches($value, (int) $id), 2);
-        $register('stache_compare', fn ($a, $b, $operator) => (int) $filter->compare($a, $b, $operator), 3);
+        $register('stache_match', fn ($type, $raw, $num, $php, $id) => (int) $filter->matches([$type, $raw, $num, $php], (int) $id), 5);
+        $register('stache_compare', fn ($at, $ar, $an, $ap, $bt, $br, $bn, $bp, $operator) => (int) $filter->compare([$at, $ar, $an, $ap], [$bt, $br, $bn, $bp], $operator), 9);
     }
 
     private function migrate(PDO $pdo): void

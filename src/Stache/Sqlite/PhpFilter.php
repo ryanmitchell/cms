@@ -35,18 +35,33 @@ class PhpFilter extends StacheEntryQueryBuilder
         }
     }
 
-    public function matches(?string $value, int $id): bool
+    public function matches(array $value, int $id): bool
     {
         $where = self::$registered[$id];
         $method = 'filterWhere'.$where['type'];
 
-        return $this->{$method}(collect([unserialize($value ?? 'N;')]), $where)->isNotEmpty();
+        return $this->{$method}(collect([static::value(...$value)]), $where)->isNotEmpty();
     }
 
-    public function compare(?string $a, ?string $b, string $operator): bool
+    public function compare(array $a, array $b, string $operator): bool
     {
         $method = 'filterTest'.$this->operators[$operator];
 
-        return (bool) $this->{$method}(unserialize($a ?? 'N;'), unserialize($b ?? 'N;'));
+        return (bool) $this->{$method}(static::value(...$a), static::value(...$b));
+    }
+
+    /**
+     * The value an entry_values row was made from.
+     */
+    public static function value(string $type, $raw, $num, $php)
+    {
+        return match ($type) {
+            'null' => null,
+            'bool' => (bool) $num,
+            'int' => (int) $raw,
+            'float' => (float) $num,
+            'string' => (string) $raw,
+            default => unserialize($php),
+        };
     }
 }
