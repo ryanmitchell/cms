@@ -87,7 +87,7 @@ class CollectionRepository implements RepositoryContract
         $this->store->save($collection);
 
         if ($collection->orderable()) {
-            $this->stache->store('entries')->store($collection->handle())->index('order')->update();
+            $this->stache->store('entries')->store($collection->handle())->updateOrders();
         }
     }
 

@@ -12,7 +12,7 @@ use PDOStatement;
  */
 class Database
 {
-    const SCHEMA_VERSION = 2;
+    const SCHEMA_VERSION = 3;
 
     private ?PDO $pdo = null;
     private array $statements = [];
@@ -44,8 +44,24 @@ class Database
         $pdo->exec('PRAGMA busy_timeout = 5000');
 
         $this->migrate($pdo);
+        $this->registerFunctions($pdo);
 
         return $this->pdo = $pdo;
+    }
+
+    /**
+     * The Stache's own filters, for the clauses SQL can't express with the same results.
+     */
+    private function registerFunctions(PDO $pdo): void
+    {
+        $filter = new PhpFilter;
+
+        $register = method_exists($pdo, 'createFunction')
+            ? fn ($name, $callback, $args) => $pdo->createFunction($name, $callback, $args)
+            : fn ($name, $callback, $args) => $pdo->sqliteCreateFunction($name, $callback, $args);
+
+        $register('stache_match', fn ($value, $id) => (int) $filter->matches($value, (int) $id), 2);
+        $register('stache_compare', fn ($a, $b, $operator) => (int) $filter->compare($a, $b, $operator), 3);
     }
 
     private function migrate(PDO $pdo): void
@@ -81,6 +97,7 @@ class Database
                 snull INTEGER NOT NULL,
                 snum REAL,
                 skey BLOB,
+                php BLOB,
                 PRIMARY KEY (field, key)
             ) WITHOUT ROWID;
             CREATE INDEX entry_values_eq ON entry_values (field, eq);

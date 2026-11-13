@@ -3,22 +3,27 @@
 namespace Statamic\Stache\Sqlite;
 
 use DateTimeInterface;
+use PDO;
 use Statamic\Facades;
 use Statamic\Stache\Query\EntryQueryBuilder as StacheEntryQueryBuilder;
 use Statamic\Support\Arr;
 
 /**
  * Finds entries with one SQL query instead of filtering and sorting every
- * entry's index values in PHP. It gives the same results as the Stache's
- * query builder: the same comparisons, the same left-to-right and/or, and
- * the same order, ties included. Anything it can't express in SQL (like,
- * JSON and date-part clauses, random order) is left to the Stache's builder.
+ * entry's index values in PHP, and gives the same results as the Stache's
+ * query builder: the same comparisons, the same left-to-right and/or, and the
+ * same order, ties included.
+ *
+ * Most clauses are plain SQL over the encoded values. The rest (like, regex,
+ * date parts, JSON, between, and comparisons PHP makes by its own rules) call
+ * the Stache's own filters through a function registered with SQLite, so the
+ * Stache's indexes are never needed.
  */
 class EntryQueryBuilder extends StacheEntryQueryBuilder
 {
     private const RANGE_OPERATORS = ['<', '>', '<=', '>='];
 
-    private const MAX_BINDINGS = 30000;
+    private array $filterIds = [];
 
     private function db(): Database
     {
@@ -27,13 +32,8 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
 
     public function get($columns = ['*'])
     {
-        if (! $compiled = $this->compile('e.key', order: true, limit: true)) {
-
-            return parent::get($columns);
-        }
-
-        return $this->onceWithColumns(Arr::wrap($columns), fn () => $this->withFakeQueryLogging(function () use ($compiled) {
-            $keys = collect($this->db()->run(...$compiled)->fetchAll(\PDO::FETCH_COLUMN));
+        return $this->onceWithColumns(Arr::wrap($columns), fn () => $this->withFakeQueryLogging(function () {
+            $keys = collect($this->fetch($this->compile('e.key', order: true, limit: true)));
 
             $items = $this->getItems($keys);
 
@@ -48,39 +48,106 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
     public function count()
     {
         // Like the Stache, a count respects the limit and offset.
-        if (! $compiled = $this->compile('e.key', order: false, limit: true)) {
-            return parent::count();
-        }
+        [$sql, $bindings] = $this->compile('e.key', order: false, limit: true);
 
-        return (int) $this->db()->run('SELECT COUNT(*) FROM ('.$compiled[0].')', $compiled[1])->fetchColumn();
+        return (int) $this->fetch(['SELECT COUNT(*) FROM ('.$sql.')', $bindings])[0];
     }
 
     protected function getCountForPagination()
     {
-        if (! $compiled = $this->compile('COUNT(*)', order: false, limit: false)) {
-            return parent::getCountForPagination();
-        }
-
-        return (int) $this->db()->run(...$compiled)->fetchColumn();
+        return (int) $this->fetch($this->compile('COUNT(*)', order: false, limit: false))[0];
     }
 
     /**
-     * @return array{0: string, 1: array}|null
+     * The same as the Stache's pluck: values grouped by collection, in each one's file
+     * order unless they're keyed, when they're in the query's order.
      */
-    private function compile(string $select, bool $order, bool $limit): ?array
+    public function pluck($column, $key = null)
     {
+        return $this->onceWithColumns(array_filter([$column, $key]), function () use ($column, $key) {
+            return $this->withFakeQueryLogging(function () use ($column, $key) {
+                $keys = $this->fetch($this->compile('e.key', order: true, limit: true));
 
-        if ($this->randomize) {
-            return null;
+                return collect($keys)
+                    ->map(fn ($rowKey) => explode('::', $rowKey, 2))
+                    ->groupBy(0)
+                    ->flatMap(function ($rows, $collection) use ($column, $key) {
+                        $ids = $rows->pluck(1);
+
+                        if ($column === 'id' && ! $key) {
+                            return $ids;
+                        }
+
+                        $values = $this->valuesFor($collection, $column, $ids);
+
+                        if (! $key) {
+                            return collect($values)->values();
+                        }
+
+                        $keyValues = $this->valuesFor($collection, $key, $ids);
+
+                        return $ids->mapWithKeys(fn ($id) => [$keyValues[$id] => $values[$id]]);
+                    });
+            });
+        });
+    }
+
+    /**
+     * A collection's values for a field, keyed by "collection::id" in file order, as a
+     * Stache index's items would be.
+     */
+    public function getWhereColumnKeysFromStore($store, $where)
+    {
+        $this->entriesStore($store)->ensureField($where['column']);
+
+        return collect($this->db()->select(
+            'SELECT v.key, v.php FROM entry_values v JOIN entries e ON e.key = v.key WHERE v.field = ? AND v.collection = ? ORDER BY e.seq',
+            [$where['column'], $store]
+        ))->mapWithKeys(fn ($row) => [$row['key'] => unserialize($row['php'])]);
+    }
+
+    /**
+     * @return array<string, mixed> Values keyed by id, in file order.
+     */
+    private function valuesFor(string $collection, string $field, $ids): array
+    {
+        $this->entriesStore($collection)->ensureField($field);
+
+        $rows = $this->db()->select(
+            'SELECT v.key, v.php FROM entry_values v JOIN entries e ON e.key = v.key
+            WHERE v.field = ? AND v.key IN (SELECT value FROM json_each(?)) ORDER BY e.seq',
+            [$field, json_encode(collect($ids)->map(fn ($id) => "{$collection}::{$id}")->values()->all())]
+        );
+
+        $prefix = strlen($collection) + 2;
+        $values = [];
+
+        foreach ($rows as $row) {
+            $values[substr($row['key'], $prefix)] = unserialize($row['php']);
         }
 
-        // Without an order, the Stache returns entries in the order the first clause finds
-        // them, and an "or" clause adds its matches after those rather than in file order.
-        // Leave the queries where that happens to the Stache.
-        if ($order && empty($this->orderBys) && ! $this->keepsFileOrder($this->wheres)) {
-            return null;
-        }
+        return $values;
+    }
 
+    /**
+     * The query's first column. Rows are fetched before the clauses' registered filters
+     * are forgotten, since SQLite runs them as it steps through the rows.
+     */
+    private function fetch(array $compiled): array
+    {
+        try {
+            return $this->db()->run(...$compiled)->fetchAll(PDO::FETCH_COLUMN);
+        } finally {
+            PhpFilter::forget($this->filterIds);
+            $this->filterIds = [];
+        }
+    }
+
+    /**
+     * @return array{0: string, 1: array}
+     */
+    private function compile(string $select, bool $order, bool $limit): array
+    {
         $collections = array_values(array_unique(empty($this->collections)
             ? Facades\Collection::handles()->all()
             : $this->collections));
@@ -100,19 +167,14 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $store->ensureField('id');
         }
 
-        $whereBindings = [];
-
-        if (false === $where = $this->compileWheres($this->wheres, $collections, $whereBindings)) {
-            return null;
-        }
-
-        if (false === $taxonomies = $this->compileTaxonomyWheres($whereBindings)) {
-            return null;
-        }
+        [$where, $whereBindings] = $this->fold($this->conditions($this->wheres, $collections));
+        [$taxonomies, $taxonomyBindings] = $this->compileTaxonomyWheres();
 
         $joins = $orders = $joinBindings = $orderBindings = [];
 
-        if ($order) {
+        if ($order && $this->randomize) {
+            $orders[] = 'RANDOM()';
+        } elseif ($order) {
             foreach (array_values($this->orderBys) as $i => $orderBy) {
                 $numeric = true;
 
@@ -130,6 +192,22 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
                 $orders[] = "COALESCE(o{$i}.snull, 1) {$direction}";
                 $orders[] = 'o'.$i.($numeric ? '.snum ' : '.skey ').$direction;
             }
+
+            // Without an order, entries come back in the order the clauses found them.
+            if (empty($this->orderBys)) {
+                foreach ($this->insertionOrder($this->wheres, $collections) as [$expression, $bindings]) {
+                    $orders[] = $expression;
+                    array_push($orderBindings, ...$bindings);
+                }
+            }
+
+            // Ties keep the order the Stache would have them in: by collection as
+            // queried, then in the order of the collection's files.
+            $orders[] = 'CASE e.collection '
+                .implode(' ', array_map(fn ($i) => "WHEN ? THEN {$i}", array_keys($collections)))
+                .' END';
+            array_push($orderBindings, ...$collections);
+            $orders[] = 'e.seq';
         }
 
         $placeholders = implode(', ', array_fill(0, count($collections), '?'));
@@ -137,18 +215,8 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         $sql = "SELECT {$select} FROM entries e ".implode(' ', $joins)
             ." WHERE e.collection IN ({$placeholders})"
             .($where ? " AND {$where}" : '')
-            .($taxonomies ? " AND {$taxonomies}" : '');
-
-        if ($order) {
-            // Ties keep the order the Stache would have them in: by collection as
-            // queried, then in the order of the collection's files.
-            $orders[] = 'CASE e.collection '
-                .implode(' ', array_map(fn ($i) => "WHEN ? THEN {$i}", array_keys($collections)))
-                .' END';
-            $orderBindings = $collections;
-            $orders[] = 'e.seq';
-            $sql .= ' ORDER BY '.implode(', ', $orders);
-        }
+            .($taxonomies ? " AND {$taxonomies}" : '')
+            .($orders ? ' ORDER BY '.implode(', ', $orders) : '');
 
         $limitBindings = [];
 
@@ -157,27 +225,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $limitBindings = [$this->limit ?? -1, (int) $this->offset];
         }
 
-        $bindings = [...$joinBindings, ...$collections, ...$whereBindings, ...$orderBindings, ...$limitBindings];
-
-        return count($bindings) > self::MAX_BINDINGS ? null : [$sql, $bindings];
-    }
-
-    /**
-     * Whether the Stache would return these clauses' matches in file order. Each "and"
-     * keeps the order of the clauses before it, so only an "or" changes it, and only
-     * in the chain of first clauses that the order comes from.
-     */
-    private function keepsFileOrder(array $wheres): bool
-    {
-        foreach (array_values($wheres) as $i => $where) {
-            if ($i > 0 && $where['boolean'] === 'or' && $where['type'] !== 'NotIn') {
-                return false;
-            }
-        }
-
-        $first = $wheres[array_key_first($wheres) ?? 0] ?? null;
-
-        return ! $first || $first['type'] !== 'Nested' || $this->keepsFileOrder($first['query']->wheres);
+        return [$sql, [...$joinBindings, ...$collections, ...$whereBindings, ...$taxonomyBindings, ...$orderBindings, ...$limitBindings]];
     }
 
     private function entriesStore(string $collection): CollectionEntriesStore
@@ -186,63 +234,149 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
     }
 
     /**
-     * Folds the clauses left to right, like intersectKeysFromWhereClause().
+     * Each clause as SQL, with its bindings.
+     *
+     * @return array<int, array{where: array, sql: string, bindings: array}>
      */
-    private function compileWheres(array $wheres, array $collections, array &$bindings): string|false|null
+    private function conditions(array $wheres, array $collections): array
     {
-        $sql = null;
+        return array_map(function ($where) use ($collections) {
+            [$sql, $bindings] = $this->compileWhere($where, $collections);
 
-        foreach ($wheres as $where) {
-            if (false === $condition = $this->compileWhere($where, $collections, $bindings)) {
-                return false;
-            }
-
-            if ($sql === null) {
-                $sql = $condition;
-            } elseif ($where['boolean'] === 'or' && $where['type'] !== 'NotIn') {
-                $sql = "({$sql} OR {$condition})";
-            } else {
-                $sql = "({$sql} AND {$condition})";
-            }
-        }
-
-        return $sql;
+            return compact('where', 'sql', 'bindings');
+        }, array_values($wheres));
     }
 
-    private function compileWhere(array $where, array $collections, array &$bindings): string|false
+    /**
+     * Folds the first $count clauses left to right, like intersectKeysFromWhereClause():
+     * an "or" adds its matches, anything else (a "not in" included) keeps only those
+     * that match both.
+     *
+     * @return array{0: ?string, 1: array}
+     */
+    private function fold(array $conditions, ?int $count = null): array
+    {
+        $sql = null;
+        $bindings = [];
+
+        foreach (array_slice($conditions, 0, $count ?? count($conditions)) as $condition) {
+            $where = $condition['where'];
+
+            if ($sql === null) {
+                $sql = $condition['sql'];
+            } elseif ($where['boolean'] === 'or' && $where['type'] !== 'NotIn') {
+                $sql = "({$sql} OR {$condition['sql']})";
+            } else {
+                $sql = "({$sql} AND {$condition['sql']})";
+            }
+
+            array_push($bindings, ...$condition['bindings']);
+        }
+
+        return [$sql, $bindings];
+    }
+
+    /**
+     * The order the Stache finds unordered entries in. Each clause's matches come in
+     * file order, and an "or" adds its new matches after the ones before it. So an
+     * entry is placed by the clause that (last) added it, then by that clause's own
+     * order, if it has one.
+     *
+     * @return array<int, array{0: string, 1: array}>
+     */
+    private function insertionOrder(array $wheres, array $collections): array
+    {
+        $wheres = array_values($wheres);
+
+        if (! $wheres) {
+            return [];
+        }
+
+        $adders = [0];
+
+        foreach ($wheres as $i => $where) {
+            if ($i > 0 && $where['boolean'] === 'or' && $where['type'] !== 'NotIn') {
+                $adders[] = $i;
+            }
+        }
+
+        $expressions = [];
+        $rank = null;
+
+        if (count($adders) > 1) {
+            $conditions = $this->conditions($wheres, $collections);
+            $rank = ['CASE', []];
+
+            // The last clause that an entry wasn't yet (or no longer) matched by.
+            for ($i = count($conditions) - 2; $i >= 0; $i--) {
+                [$sql, $bindings] = $this->fold($conditions, $i + 1);
+                $rank[0] .= " WHEN NOT {$sql} THEN ".($i + 1);
+                array_push($rank[1], ...$bindings);
+            }
+
+            $rank[0] .= ' ELSE 0 END';
+            $expressions[] = $rank;
+        }
+
+        foreach ($adders as $i) {
+            if ($wheres[$i]['type'] !== 'Nested') {
+                continue;
+            }
+
+            foreach ($this->insertionOrder($wheres[$i]['query']->wheres, $collections) as [$sql, $bindings]) {
+                $expressions[] = $rank
+                    ? ["CASE WHEN {$rank[0]} = {$i} THEN {$sql} END", [...$rank[1], ...$bindings]]
+                    : [$sql, $bindings];
+            }
+        }
+
+        return $expressions;
+    }
+
+    /**
+     * @return array{0: string, 1: array}
+     */
+    private function compileWhere(array $where, array $collections): array
     {
         if ($where['type'] === 'Nested') {
-            $sql = $this->compileWheres($where['query']->wheres, $collections, $bindings);
+            [$sql, $bindings] = $this->fold($this->conditions($where['query']->wheres, $collections));
 
-            return $sql === null ? '1' : $sql;
-        }
-
-        if (! in_array($where['type'], ['Basic', 'In', 'NotIn', 'Null', 'NotNull'])) {
-            return false;
-        }
-
-        $conditionBindings = [];
-
-        $condition = match ($where['type']) {
-            'Basic' => $this->compileBasic($where['operator'], $where['value'], $conditionBindings),
-            'In' => $this->compileIn($where['values'], $conditionBindings, false),
-            'NotIn' => $this->compileIn($where['values'], $conditionBindings, true),
-            'Null' => "type = 'null'",
-            'NotNull' => "type <> 'null'",
-        };
-
-        if ($condition === false) {
-            return false;
+            return [$sql ?? '1', $bindings];
         }
 
         foreach ($collections as $collection) {
             $this->entriesStore($collection)->ensureField($where['column']);
         }
 
-        $bindings[] = $where['column'];
-        array_push($bindings, ...$conditionBindings);
+        if ($where['type'] === 'Column') {
+            foreach ($collections as $collection) {
+                $this->entriesStore($collection)->ensureField($where['value']);
+            }
 
-        return "e.key IN (SELECT key FROM entry_values WHERE field = ? AND {$condition})";
+            return [
+                'e.key IN (SELECT a.key FROM entry_values a JOIN entry_values b ON b.key = a.key AND b.field = ? WHERE a.field = ? AND stache_compare(a.php, b.php, ?))',
+                [$where['value'], $where['column'], $where['operator']],
+            ];
+        }
+
+        $bindings = [];
+
+        $condition = match ($where['type']) {
+            'Basic' => $this->compileBasic($where['operator'], $where['value'], $bindings),
+            'In' => $this->compileIn($where['values'], $bindings, false),
+            'NotIn' => $this->compileIn($where['values'], $bindings, true),
+            'Null' => "type = 'null'",
+            'NotNull' => "type <> 'null'",
+            default => false,
+        };
+
+        if ($condition === false) {
+            // Left to the Stache's own filter for this kind of clause.
+            $condition = 'stache_match(php, ?)';
+            $bindings = [$this->filterIds[] = PhpFilter::register($where)];
+        }
+
+        return ["e.key IN (SELECT key FROM entry_values WHERE field = ? AND {$condition})", [$where['column'], ...$bindings]];
     }
 
     private function compileBasic(string $operator, $value, array &$bindings): string|false
@@ -320,8 +454,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $parts[] = "(type IN ('int', 'float', 'string', 'date') AND raw {$operator} ?)";
             $bindings[] = $value;
         } else {
-            // Comparing with null or a boolean follows different rules per type. It's
-            // rare enough to leave to the Stache.
+            // Comparing with null or a boolean follows different rules per type.
             return false;
         }
 
@@ -351,24 +484,22 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $keys[] = $encoder->inkey($value);
         }
 
-        if (empty($keys)) {
-            return $not ? '1' : '0';
-        }
-
-        array_push($bindings, ...$keys);
-        $placeholders = implode(', ', array_fill(0, count($keys), '?'));
+        // One binding however many values there are.
+        $bindings[] = json_encode($keys);
 
         // Arrays (and anything else without a lookup key) are never "in".
         return $not
-            ? "(inkey IS NULL OR inkey NOT IN ({$placeholders}))"
-            : "inkey IN ({$placeholders})";
+            ? '(inkey IS NULL OR inkey NOT IN (SELECT value FROM json_each(?)))'
+            : 'inkey IN (SELECT value FROM json_each(?))';
     }
 
     /**
      * The same as addTaxonomyWheres(), using the entry_terms table instead of
      * reading the terms stores' associations and querying by every entry id.
+     *
+     * @return array{0: ?string, 1: array}
      */
-    private function compileTaxonomyWheres(array &$bindings): string|false|null
+    private function compileTaxonomyWheres(): array
     {
         $included = $excluded = [];
 
@@ -378,11 +509,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $byTaxonomy = [];
 
             foreach ($terms as $term) {
-                if (! is_string($term) || ! str_contains($term, '::')) {
-                    return false;
-                }
-
-                [$taxonomy, $slug] = explode('::', $term, 2);
+                [$taxonomy, $slug] = array_pad(explode('::', (string) $term, 2), 2, '');
                 $byTaxonomy[$taxonomy][] = $slug;
             }
 
@@ -390,8 +517,8 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             $groupBindings = [];
 
             foreach ($byTaxonomy as $taxonomy => $slugs) {
-                $groups[] = '(taxonomy = ? AND slug IN ('.implode(', ', array_fill(0, count($slugs), '?')).'))';
-                array_push($groupBindings, $taxonomy, ...$slugs);
+                $groups[] = '(taxonomy = ? AND slug IN (SELECT value FROM json_each(?)))';
+                array_push($groupBindings, $taxonomy, json_encode($slugs));
             }
 
             $subquery = $groups
@@ -406,6 +533,7 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
         }
 
         $sql = [];
+        $bindings = [];
 
         foreach ($included as [$subquery, $subqueryBindings]) {
             $sql[] = $subquery;
@@ -421,6 +549,6 @@ class EntryQueryBuilder extends StacheEntryQueryBuilder
             }
         }
 
-        return $sql ? implode(' AND ', $sql) : null;
+        return [$sql ? implode(' AND ', $sql) : null, $bindings];
     }
 }

@@ -95,7 +95,7 @@ class CollectionsStore extends BasicStore
             $collection->updateEntryUris();
 
             if ($collection->orderable()) {
-                Stache::store('entries')->store($collection->handle())->index('order')->update();
+                Stache::store('entries')->store($collection->handle())->updateOrders();
             }
         }
     }

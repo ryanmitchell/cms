@@ -219,6 +219,10 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
     private function updateEntries($ids): void
     {
+        // Work the uris out now, while the change that caused this is in hand, and keep
+        // them, as the Stache does by updating its uri index.
+        $this->ensureField('uri');
+
         $ids = collect($ids)->isEmpty() ? $this->paths()->keys() : collect($ids);
 
         $this->db()->transaction(function () use ($ids) {
@@ -244,8 +248,9 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
     protected function cachedUri($id)
     {
+        // Without uris indexed there's nothing to look up; the entry works its own out.
         if (! array_key_exists('uri', $this->populatedFields())) {
-            return parent::cachedUri($id);
+            return null;
         }
 
         $uri = $this->db()->run("SELECT raw FROM entry_values WHERE field = 'uri' AND key = ?", [$this->rowKey($id)])->fetchColumn();
@@ -395,11 +400,11 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
 
                 $rows[] = [
                     $field, $this->rowKey($key), $this->childKey(), $encoded['type'], $encoded['eq'], $encoded['inkey'],
-                    $encoded['raw'], $encoded['num'], $encoded['snull'], $encoded['snum'], $encoded['skey'],
+                    $encoded['raw'], $encoded['num'], $encoded['snull'], $encoded['snum'], $encoded['skey'], serialize($value),
                 ];
             }
 
-            $this->db()->insertMany('entry_values', ['field', 'key', 'collection', 'type', 'eq', 'inkey', 'raw', 'num', 'snull', 'snum', 'skey'], $rows, [10], 'INSERT OR REPLACE');
+            $this->db()->insertMany('entry_values', ['field', 'key', 'collection', 'type', 'eq', 'inkey', 'raw', 'num', 'snull', 'snum', 'skey', 'php'], $rows, [10, 11], 'INSERT OR REPLACE');
             $rows = [];
 
             if (! $fresh && $numeric[$field] !== ($this->populatedFields()[$field] ?? true)) {
