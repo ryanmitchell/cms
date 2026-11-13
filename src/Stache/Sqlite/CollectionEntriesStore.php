@@ -268,6 +268,22 @@ class CollectionEntriesStore extends StacheCollectionEntriesStore
         $this->db()->run('INSERT OR IGNORE INTO entry_collections (collection) VALUES (?)', [$this->childKey()]);
     }
 
+    /**
+     * The row written for the entry holds its path, so there's no list to load and
+     * write back: only what's already in memory needs to agree.
+     */
+    protected function setPath($key, $path)
+    {
+        $this->paths?->put($key, $path);
+        $this->keys?->set($key, $path);
+    }
+
+    protected function forgetPath($key)
+    {
+        $this->paths?->forget($key);
+        $this->keys?->forget($key);
+    }
+
     public function clearCachedPaths()
     {
         $this->paths = null;
