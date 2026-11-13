@@ -5,7 +5,6 @@ namespace Statamic\Stache\Sqlite;
 use Statamic\Contracts\Taxonomies\Term;
 use Statamic\Facades\Entry;
 use Statamic\Facades\Stache;
-use Statamic\Facades\Taxonomy;
 use Statamic\Stache\Repositories\TermRepository as StacheTermRepository;
 use Statamic\Taxonomies\LocalizedTerm;
 
@@ -25,9 +24,9 @@ class TermRepository extends StacheTermRepository
     {
         $taxonomy = $term->taxonomyHandle();
 
-        foreach (Taxonomy::findByHandle($taxonomy)?->collections() ?? [] as $collection) {
-            Stache::store('entries')->store($collection->handle())->ensureField('id');
-        }
+        // Working out the taxonomy's terms loads the entries that use them, and is only
+        // done once: looking up its collections for every count was most of the cost.
+        Stache::store('terms')->store($taxonomy)->ensureTerms();
 
         $sql = 'SELECT id FROM entry_terms WHERE taxonomy = ? AND value_key = ?';
         $bindings = [$taxonomy, (string) $term->inDefaultLocale()->slug()];
