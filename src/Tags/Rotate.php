@@ -44,6 +44,12 @@ class Rotate extends Tags implements ResetsState
             $vars = $this->expand($vars);
         }
 
+        // When asked to, follow the position in the current loop, so every run of the
+        // loop (e.g. each iteration of a parent loop) starts again at the first value.
+        if ($this->params->bool('per_loop') && is_numeric($index = $this->context->get('index'))) {
+            return $vars[(int) $index % count($vars)];
+        }
+
         $switch = $vars[static::$counts[$hash] % count($vars)];
 
         static::$counts[$hash]++;
