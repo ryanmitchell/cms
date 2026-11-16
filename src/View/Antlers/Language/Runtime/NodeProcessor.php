@@ -2389,42 +2389,48 @@ class NodeProcessor
 
                                     $runtimeAssignmentsToProcess = [];
 
-                                    foreach ($val as $procVal) {
-                                        if ($tagCallbackResult != null) {
-                                            $runtimeData = array_merge($runtimeData, GlobalRuntimeState::$tracedRuntimeAssignments);
-                                        }
-                                        $processor->replaceData(PathDataManager::reduce($procVal) + $runtimeData);
-                                        $loopBuffer .= $this->modifyBufferAppend($processor->reduce($tChildren));
+                                    GlobalRuntimeState::enterLoop();
 
-                                        $runtimeAssignments = $processor->getRuntimeAssignments();
+                                    try {
+                                        foreach ($val as $procVal) {
+                                            if ($tagCallbackResult != null) {
+                                                $runtimeData = array_merge($runtimeData, GlobalRuntimeState::$tracedRuntimeAssignments);
+                                            }
+                                            $processor->replaceData(PathDataManager::reduce($procVal) + $runtimeData);
+                                            $loopBuffer .= $this->modifyBufferAppend($processor->reduce($tChildren));
 
-                                        if ($tagCallbackResult != null) {
-                                            $runtimeAssignments = array_merge($runtimeAssignments, GlobalRuntimeState::$tracedRuntimeAssignments);
-                                        }
+                                            $runtimeAssignments = $processor->getRuntimeAssignments();
 
-                                        if (! empty($runtimeAssignments)) {
-                                            $procActive = $processor->getActiveData();
-
-                                            foreach ($runtimeAssignments as $var => $varValue) {
-                                                if (array_key_exists($var, $procActive)) {
-                                                    $runtimeAssignments[$var] = $procActive[$var];
-                                                }
+                                            if ($tagCallbackResult != null) {
+                                                $runtimeAssignments = array_merge($runtimeAssignments, GlobalRuntimeState::$tracedRuntimeAssignments);
                                             }
 
-                                            foreach ($runtimeAssignments as $assignmentVar => $assignmentValue) {
-                                                if (array_key_exists($assignmentVar, $this->runtimeAssignments)) {
-                                                    $runtimeAssignmentsToProcess[$assignmentVar] = $assignmentValue;
+                                            if (! empty($runtimeAssignments)) {
+                                                $procActive = $processor->getActiveData();
+
+                                                foreach ($runtimeAssignments as $var => $varValue) {
+                                                    if (array_key_exists($var, $procActive)) {
+                                                        $runtimeAssignments[$var] = $procActive[$var];
+                                                    }
                                                 }
+
+                                                foreach ($runtimeAssignments as $assignmentVar => $assignmentValue) {
+                                                    if (array_key_exists($assignmentVar, $this->runtimeAssignments)) {
+                                                        $runtimeAssignmentsToProcess[$assignmentVar] = $assignmentValue;
+                                                    }
+                                                }
+
+                                                $runtimeData = array_merge($runtimeData, $runtimeAssignmentsToProcess);
                                             }
 
-                                            $runtimeData = array_merge($runtimeData, $runtimeAssignmentsToProcess);
-                                        }
+                                            $processor->setRuntimeAssignments($runtimeAssignments);
 
-                                        $processor->setRuntimeAssignments($runtimeAssignments);
-
-                                        if (count($this->data) > $dataCount) {
-                                            $this->popLoopScope();
+                                            if (count($this->data) > $dataCount) {
+                                                $this->popLoopScope();
+                                            }
                                         }
+                                    } finally {
+                                        GlobalRuntimeState::exitLoop();
                                     }
 
                                     $this->data = $lockData;

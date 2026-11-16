@@ -3,6 +3,7 @@
 namespace Statamic\Tags;
 
 use Statamic\Support\Arr;
+use Statamic\View\Antlers\Language\Runtime\GlobalRuntimeState;
 use Statamic\View\State\ResetsState;
 
 class Rotate extends Tags implements ResetsState
@@ -32,7 +33,9 @@ class Rotate extends Tags implements ResetsState
 
         // Create a unique hash based on the parameters to provide users
         // a method of using multiple switch tags in a single template.
-        $hash = md5(implode(',', $this->params->all()));
+        // Inside a loop, each run of the loop gets its own count, so
+        // it starts again at the first value (e.g. in nested loops).
+        $hash = md5(implode(',', $this->params->all())).'|'.GlobalRuntimeState::currentLoop();
 
         if (! isset(static::$counts[$hash])) {
             static::$counts[$hash] = 0;

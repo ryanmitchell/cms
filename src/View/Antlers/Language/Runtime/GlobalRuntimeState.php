@@ -103,6 +103,23 @@ class GlobalRuntimeState
     public static $tracedRuntimeAssignments = [];
 
     /**
+     * The IDs of the loops currently being rendered, innermost last.
+     *
+     * Every time a loop starts rendering its items it gets a new ID, so
+     * tags can tell one run of a loop apart from the next.
+     *
+     * @var int[]
+     */
+    public static $loopStack = [];
+
+    /**
+     * The last ID handed out to a loop.
+     *
+     * @var int
+     */
+    protected static $lastLoopId = 0;
+
+    /**
      * A list of IDs of all abandoned nodes.
      *
      * @var array
@@ -273,8 +290,27 @@ class GlobalRuntimeState
         self::$isCascadeEnabled = true;
     }
 
+    public static function enterLoop(): void
+    {
+        self::$loopStack[] = ++self::$lastLoopId;
+    }
+
+    public static function exitLoop(): void
+    {
+        array_pop(self::$loopStack);
+    }
+
+    /**
+     * The ID of the innermost loop being rendered, or null outside of a loop.
+     */
+    public static function currentLoop(): ?int
+    {
+        return empty(self::$loopStack) ? null : end(self::$loopStack);
+    }
+
     public static function resetGlobalState()
     {
+        self::$loopStack = [];
         self::$templateFileStack = [];
         self::$shareVariablesTemplateTrigger = '';
         self::$layoutVariables = [];

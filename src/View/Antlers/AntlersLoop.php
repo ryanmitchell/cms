@@ -28,9 +28,12 @@ class AntlersLoop extends AntlersString
         $previousIsEvaluatingUserData = GlobalRuntimeState::$isEvaluatingUserData;
         GlobalRuntimeState::$isEvaluatingUserData = ! $this->trusted;
 
+        GlobalRuntimeState::enterLoop();
+
         try {
             return $this->renderLoopContent();
         } finally {
+            GlobalRuntimeState::exitLoop();
             GlobalRuntimeState::$isEvaluatingUserData = $previousIsEvaluatingUserData;
         }
     }
